@@ -30,11 +30,12 @@ found [here](https://github.com/gcarq/rusty-blockparser/tree/master/src/callback
 
 #### Extract Balances of all known addresses
 
-The command `balances` extracts the balance of all known addresses and dumps it to a csv file called `balances.csv` with
-the following format:
+The command `balances` extracts balance information for all known addresses and dumps it to a csv file called `balances.csv`.
+Use the optional flag `--keep-zero-balances` to keep addresses with a final balance of zero in the output.
+The csv file is in the following format:
 
 ```
-balances.csv: address ; balance
+balances.csv: address ; balance ; pubkey ; total sent ; total received ; first spent time ; last spent time ; first received time ; last received time
 ```
 
 #### Extract all UTXOs along with their corresponding address balances
