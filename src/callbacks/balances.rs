@@ -5,8 +5,9 @@ use std::path::PathBuf;
 
 use clap::{Arg, ArgMatches, Command};
 
-use crate::blockchain::proto::tx::{TxOutpoint};
+use crate::blockchain::proto::tx::TxOutpoint;
 use crate::blockchain::proto::script::ScriptPattern;
+use crate::blockchain::proto::ToRaw;
 
 use crate::blockchain::proto::block::Block;
 use crate::callbacks::{Callback, common};
@@ -104,7 +105,7 @@ impl Callback for Balances {
     ///   * output_val
     ///   * address
     fn on_block(&mut self, block: &Block, block_height: u64) -> Result<()> {
-        let timestamp = block.header.timestamp;
+        let timestamp = block.header.value.timestamp;
         for tx in &block.txs {
             // process inputs
             for input in &tx.value.inputs {
