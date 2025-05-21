@@ -2,6 +2,9 @@ use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{BufWriter, Write};
 use std::path::PathBuf;
+use std::sync::Mutex;
+
+use rayon::prelude::*;
 
 use clap::{Arg, ArgMatches, Command};
 
@@ -33,9 +36,9 @@ pub struct Balances {
     writer: BufWriter<File>,
 
     // key: txid + index
-    unspents: HashMap<Vec<u8>, common::UnspentValue>,
+    unspents: Mutex<HashMap<Vec<u8>, common::UnspentValue>>,
 
-    stats: HashMap<String, AddressStats>,
+    stats: Mutex<HashMap<String, AddressStats>>,
 
     keep_zero_balances: bool,
 
@@ -81,8 +84,8 @@ impl Callback for Balances {
         let cb = Balances {
             dump_folder: PathBuf::from(dump_folder),
             writer: Balances::create_writer(4000000, dump_folder.join("balances.csv.tmp"))?,
-            unspents: HashMap::with_capacity(10000000),
-            stats: HashMap::new(),
+            unspents: Mutex::new(HashMap::with_capacity(10000000)),
+            stats: Mutex::new(HashMap::new()),
             keep_zero_balances: keep_zero,
             start_height: 0,
             end_height: 0,
@@ -106,25 +109,29 @@ impl Callback for Balances {
     ///   * address
     fn on_block(&mut self, block: &Block, block_height: u64) -> Result<()> {
         let timestamp = block.header.value.timestamp;
-        for tx in &block.txs {
+        let unspents = &self.unspents;
+        let stats = &self.stats;
+        block.txs.par_iter().for_each(|tx| {
             // process inputs
             for input in &tx.value.inputs {
                 let key = input.outpoint.to_bytes();
-                if let Some(unspent) = self.unspents.remove(&key) {
-                    let stats = self
-                        .stats
-                        .entry(unspent.address.clone())
-                        .or_default();
-                    stats.balance = stats.balance.saturating_sub(unspent.value);
-                    stats.total_sent += unspent.value;
-                    if stats.first_spent_time.is_none() {
-                        stats.first_spent_time = Some(timestamp);
+                let unspent = {
+                    let mut map = unspents.lock().unwrap();
+                    map.remove(&key)
+                };
+                if let Some(unspent) = unspent {
+                    let mut stats_map = stats.lock().unwrap();
+                    let entry = stats_map.entry(unspent.address.clone()).or_default();
+                    entry.balance = entry.balance.saturating_sub(unspent.value);
+                    entry.total_sent += unspent.value;
+                    if entry.first_spent_time.is_none() {
+                        entry.first_spent_time = Some(timestamp);
                     }
-                    stats.last_spent_time = Some(timestamp);
+                    entry.last_spent_time = Some(timestamp);
 
-                    if stats.pubkey.is_none() {
+                    if entry.pubkey.is_none() {
                         if let Some(pk) = extract_pubkey_from_script_sig(&input.script_sig) {
-                            stats.pubkey = Some(pk);
+                            entry.pubkey = Some(pk);
                         }
                     }
                 }
@@ -139,24 +146,28 @@ impl Callback for Balances {
                         value: output.out.value,
                         address: address.clone(),
                     };
-                    self.unspents.insert(key, unspent);
-
-                    let stats = self.stats.entry(address.clone()).or_default();
-                    stats.balance += output.out.value;
-                    stats.total_received += output.out.value;
-                    if stats.first_received_time.is_none() {
-                        stats.first_received_time = Some(timestamp);
+                    {
+                        let mut map = unspents.lock().unwrap();
+                        map.insert(key, unspent);
                     }
-                    stats.last_received_time = Some(timestamp);
 
-                    if stats.pubkey.is_none() {
+                    let mut stats_map = stats.lock().unwrap();
+                    let entry = stats_map.entry(address.clone()).or_default();
+                    entry.balance += output.out.value;
+                    entry.total_received += output.out.value;
+                    if entry.first_received_time.is_none() {
+                        entry.first_received_time = Some(timestamp);
+                    }
+                    entry.last_received_time = Some(timestamp);
+
+                    if entry.pubkey.is_none() {
                         if let Some(pk) = extract_pubkey_from_script_pubkey(&output.out.script_pubkey, &output.script.pattern) {
-                            stats.pubkey = Some(pk);
+                            entry.pubkey = Some(pk);
                         }
                     }
                 }
             }
-        }
+        });
         Ok(())
     }
 
@@ -167,7 +178,8 @@ impl Callback for Balances {
             b"address;balance;pubkey;total sent;total received;first spent time;last spent time;first received time;last received time\n",
         )?;
 
-        for (address, stats) in &self.stats {
+        let stats_map = self.stats.lock().unwrap();
+        for (address, stats) in stats_map.iter() {
             if !self.keep_zero_balances && stats.balance == 0 {
                 continue;
             }
@@ -195,6 +207,8 @@ impl Callback for Balances {
             self.writer.write_all(line.as_bytes())?;
         }
 
+        drop(stats_map);
+
         fs::rename(
             self.dump_folder.as_path().join("balances.csv.tmp"),
             self.dump_folder.as_path().join(format!(
@@ -207,7 +221,7 @@ impl Callback for Balances {
         info!(
             target: "callback",
             "Done.\nDumped {} addresses.",
-            self.stats.len()
+            self.stats.lock().unwrap().len()
         );
         Ok(())
     }
